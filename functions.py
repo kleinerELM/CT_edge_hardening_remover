@@ -201,9 +201,9 @@ class CTPreprocessor:
                 border_position.append(np.argmax(polar_image[i]))
 
             medial_filter_kernel = 101
-            border_position = median_filter(  np.array(border_position).astype(np.uint16), medial_filter_kernel )
-            print(np.mean(border_position), int(np.mean(border_position)))
-            self.border_deviation =(border_position - np.mean(border_position)).astype(np.int16)
+            self.border_position = median_filter(  np.array(border_position).astype(np.uint16), medial_filter_kernel )
+
+            self.border_deviation =(self.border_position - np.mean(self.border_position)).astype(np.int16)
 
             #show uncircularity
             if show_graph:
@@ -216,7 +216,7 @@ class CTPreprocessor:
                 ax.legend()
                 plt.show()
 
-            return border_position, self.border_deviation
+            return self.border_position, self.border_deviation
         else:
             raise Exception( 'No polar image found. Check call variable polar_image or call self.circle_to_polar() first!' )
 
@@ -247,7 +247,24 @@ class CTPreprocessor:
         else:
             raise Exception( 'No polar image found. Check call variable polar_image or call self.circle_to_polar() first!' )
 
+    def correct_circularity( self, show_result = False ):
+        goal_length = self.border_position[0]-self.border_deviation[0] # get a constant goal length
+        result = []
+        for i, line in enumerate(self.polar_image):
+            start_length = self.border_position[i]
+            result.append( cv2.resize( line[:start_length], (1,goal_length), interpolation = cv2.INTER_LINEAR ).flatten() )
 
+        result = np.pad(result, ((0,0), (0,self.polar_image.shape[1]-goal_length) ), mode='constant', constant_values=0 )
+        if show_result:
+            fig, ax = plt.subplots(1,2, figsize=(20,10))
+            ax[0].imshow( self.polar_image, cmap='gray' )
+            ax[0].plot( self.border_position,range(len(self.border_position)) )
+            ax[0].set_title( "polar transformed circle & indicating the identified border" )
+            ax[1].imshow( result, cmap='gray' )
+            ax[1].set_title( "polar transformed circle, corrected circularity" )
+            plt.show()
+
+        return result
 
 def smooth_polar_image(polar_image, median_blur_kernel = 21):
     for i in range(len(polar_image)):
