@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import tifffile, os, cv2, multiprocessing
 import numpy as np
 import scipy.optimize
 import matplotlib.pyplot as plt
-import tifffile, os, cv2
 from scipy.ndimage import median_filter
 
 class FitCurveProfile:
@@ -72,51 +72,57 @@ def fit_background_function( mean_values, p0 = (1000, 700, 100, 1.5), remove_y_o
 
     return fit_data, offset
 
-
 class CTPreprocessor:
     def __init__(self, filepath):
         if os.path.isfile(filepath):
             self.dataset = tifffile.imread(filepath)
             self.z, self.h, self.w = self.dataset.shape
             print( "Dimensions: z = {:d}, h = {:d}, w = {:d} [px]".format(self.z, self.h, self.w) )
+            self.unit = 'px'
 
-            # set some global constants
-            self.gauss_kernel     = 11 # in px
-            self.circle_threshold = 20 # brightness level
-            self.pore_threshold   = 70 # brightness level
         else:
             raise Exception( '{} does not exist!'.format(filepath) )
 
     def select_slice(self, id):
         self.slice_id   = id
-        self.slice      = self.dataset[ id ]
-        self.center     = (0,0)
-        self.min_length = 0
-        self.blur       = []
-        self.mean_polar_brightness = []
-        self.unit       = 'px'
+        self.slice      = CTSlicePreprocessor( id, self.dataset[ id ], self.unit )
 
-        return self.slice
+        return self.slice.slice
 
     def show_example_slices(self):
-        fig, ax = plt.subplots(1, 2, figsize=(18, 8))
+        fig, ax = plt.subplots(1, 2, figsize=( 18, 8 ))
         fig.suptitle( "example images", fontsize=16 )
 
         ax[0].imshow( self.select_slice( int(self.z/3) ), cmap='gray' )
-        ax[0].set_title( "slice id {:d}".format( self.slice_id ) )
-        ax[0].set_xlabel("x-position in {}".format( self.unit ))
-        ax[0].set_ylabel("y-position in {}".format( self.unit ))
+        ax[0].set_title(  "slice id {:d}".format( self.slice_id ) )
+        ax[0].set_xlabel( "x-position in {}".format( self.unit )  )
+        ax[0].set_ylabel( "y-position in {}".format( self.unit )  )
 
         ax[1].imshow( self.select_slice( int(self.z/3*2) ), cmap='gray' )
-        ax[1].set_title( "slice id {:d}".format( self.slice_id ) )
-        ax[1].set_xlabel("x-position in {}".format( self.unit ))
-        ax[1].set_ylabel("y-position in {}".format( self.unit ))
+        ax[1].set_title(  "slice id {:d}".format( self.slice_id ) )
+        ax[1].set_xlabel( "x-position in {}".format( self.unit )  )
+        ax[1].set_ylabel( "y-position in {}".format( self.unit )  )
 
         plt.show()
 
+class CTSlicePreprocessor:
+    def __init__(self, id, slice, unit = 'px') -> None:
+        self.slice_id              = id
+        self.slice                 = slice
+        self.center                = (0,0)
+        self.min_length            = 0
+        self.radius                = 0
+        self.blur                  = []
+        self.mean_polar_brightness = []
+        self.h, self.w             = self.slice.shape # set some global constants
+        self.unit                  = unit
+        self.gauss_kernel          = 11 # in px
+        self.circle_threshold      = 20 # brightness level
+        self.pore_threshold        = 70 # brightness level
+
     def identify_main_circle(self, verbose = True):
         if len(self.blur) == 0:
-            self.blur = cv2.GaussianBlur(self.slice,(self.gauss_kernel,self.gauss_kernel),0)
+            self.blur = cv2.GaussianBlur(self.slice, (self.gauss_kernel,self.gauss_kernel), 0)
 
         _, thresh = cv2.threshold( self.blur, self.circle_threshold, 255, cv2.THRESH_BINARY_INV )
 
@@ -166,22 +172,24 @@ class CTPreprocessor:
             # use the median of the slice value to replace pores, if no other background is given
             if background == []: background = np.median( self.slice )
             self.removed_pores = (self.slice * np.logical_not( pore_mask ) + pore_mask * background)
+
+            self.polar_image = self.circle_to_polar(self.removed_pores)
             return  self.removed_pores
 
         else:
             raise Exception( 'Center point not found or not yet calculated. Call self.identify_main_circle() first!' )
 
     # convert linear image (containing a slice of the circular specimen) to polar coordinates
-    def circle_to_polar(self, image=[], median_blur_kernel = 1):
+    def circle_to_polar(self, image, median_blur_kernel = 1):
         if self.center != (0,0):
-            is_main_polar = (image != [])
-            if is_main_polar: image = self.removed_pores # usually this image is used...
+            #is_main_polar = (image != [])
+            #if is_main_polar: image = self.removed_pores # usually this image is used...
 
             polar_image = cv2.linearPolar(image, (self.center[0], self.center[1]), self.min_length, cv2.WARP_FILL_OUTLIERS)
 
             # blur in the direction of the radius, if the kernel is larger than 1
             if median_blur_kernel > 1: polar_image = smooth_polar_image(polar_image, median_blur_kernel)
-            if is_main_polar: self.polar_image = polar_image
+            #if is_main_polar: self.polar_image = polar_image
 
             return polar_image
         else:
@@ -215,7 +223,7 @@ class CTPreprocessor:
             if is_main_polar:
                 self.mean_polar_brightness = mean_polar_brightness
                 self.polar_background      = polar_background
-                self.border_position       = border_position
+                self.radius                = border_position
 
             return mean_polar_brightness, polar_background
         else:
@@ -264,6 +272,16 @@ class CTPreprocessor:
         else:
             raise Exception( 'Mean polar brightness is not calculated yet. Call self.get_mean_polar_brightness() first!' )
 
+    def fit_to_polar(self, fit_data, polar_image):
+        # process the background
+        polar_background_fit = np.empty(shape=polar_image.shape, dtype=int)
+        polar_background_fit.fill(0)
+
+        for i in range(len(polar_image)):
+            for j,v in enumerate(fit_data.astype(np.uint8)):
+                polar_background_fit[i][j] = v
+
+        return polar_background_fit
 
     def get_polar_background(self, polar_image=[], verbose_level = 2):
         if polar_image == []: polar_image = self.polar_image # usually this image is used...
@@ -273,14 +291,9 @@ class CTPreprocessor:
             p0 = self.get_fit_function_start_values()
             fit_data, offset = fit_background_function( mean_values, p0, verbose_level = verbose_level )
             # process the background
-            polar_background_fit = np.empty(shape=polar_image.shape, dtype=int)
-            polar_background_fit.fill(0)
+            polar_background_fit = self.fit_to_polar( fit_data, polar_image )
 
-            for i in range(len(polar_image)):
-                for j,v in enumerate(fit_data.astype(np.uint8)):
-                    polar_background_fit[i][j] = v
-
-            return polar_background, polar_background_fit, offset
+            return fit_data, polar_background, polar_background_fit, offset
         else:
             raise Exception( 'No polar image found. Check call variable polar_image or call self.circle_to_polar() first!' )
 
@@ -312,13 +325,6 @@ class CTPreprocessor:
 
     # defining the process for a single correction step
     def fix_background_single( self, slice, background, verbose_level = 0 ):
-
-        ## process background of the dataset
-        #if background == []:
-        #    if (verbose_level > 0): print('No background given, calculating initial background.')
-        #    polar_background, polar_background_fit, background_offset = self.get_polar_background( slice, verbose_level = verbose_level )
-        #    background = self.polar_to_circle( polar_background_fit + background_offset )
-
         # get binary mask of inner pores using a (previously fixed) slice
         inner_pores   = self.get_inner_pores( slice )
 
@@ -331,7 +337,7 @@ class CTPreprocessor:
         # try to correct circularity error
         border_position, border_deviation = self.get_border_deviation( polar_image_removed_pores, show_graph = (verbose_level == 2) )
         polar_image_corr = self.correct_circularity( border_position, border_deviation, show_result = (verbose_level == 2) )
-        _, polar_background_fit, background_offset = self.get_polar_background( polar_image_corr, verbose_level = verbose_level )
+        fit_data, _, polar_background_fit, background_offset = self.get_polar_background( polar_image_corr, verbose_level = verbose_level )
 
         polar_mean_background = self.polar_to_circle(polar_background_fit + background_offset)
 
@@ -357,20 +363,20 @@ class CTPreprocessor:
             ax[4].set_title( "output image" )
             plt.show()
 
-        return polar_mean_background, circular_fixed_image
+        return fit_data, self.polar_to_circle(polar_background_fit), polar_mean_background, circular_fixed_image
 
     def fix_background( self, iterations = 2, verbose_level = 0 ):
         if (verbose_level > 0): print('Calculating initial background.')
-        _, polar_background_fit, background_offset = self.get_polar_background( self.slice, verbose_level = verbose_level )
-        background = self.polar_to_circle( polar_background_fit + background_offset )
+        _, _, background_difference, background_offset = self.get_polar_background( self.slice, verbose_level = verbose_level )
+        background = background_difference + background_offset# self.polar_to_circle( polar_background_fit + background_offset )
 
         for i in range(iterations):
             if (verbose_level > 0): print("\nIteration #{:d} of {:d}".format(i+1, iterations))
-            background, fixed = self.fix_background_single( self.slice, background=background, verbose_level = verbose_level )
+            fit_data, background_difference, background, fixed = self.fix_background_single( self.slice, background=background, verbose_level = verbose_level )
 
         self.background = background
         self.fixed = fixed
-        return background, fixed
+        return fit_data, background_difference, background, fixed
 
 def smooth_polar_image(polar_image, median_blur_kernel = 21):
     for i in range(len(polar_image)):
