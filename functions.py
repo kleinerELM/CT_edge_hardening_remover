@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import tifffile, os, cv2, multiprocessing
+import tifffile, os, cv2, multiprocessing, time, sys
 import numpy as np
 import scipy.optimize
 import matplotlib.pyplot as plt
@@ -73,6 +73,7 @@ def fit_background_function( mean_values, p0 = (1000, 700, 100, 1.5), remove_y_o
     return fit_data, offset
 
 class CTPreprocessor:
+        
     def __init__(self, filepath):
         if os.path.isfile(filepath):
             self.dataset = tifffile.imread(filepath)
@@ -104,6 +105,76 @@ class CTPreprocessor:
         ax[1].set_ylabel( "y-position in {}".format( self.unit )  )
 
         plt.show()
+
+
+    def process_slice_cb(self, r):
+        id = r['id']
+        self.circle_max_radii[id]   = r['min_length']     # not really r
+        self.circle_radii[id]       = r['radius']         # actual radius
+        self.circle_centers[id]     = r['center']         # x and y position of the identified circle
+        self.pore_areas[id]         = r['pore_area']      # porea area percentage
+        self.fixed_volume[id]       = r['bg_diff_volume'] # the processed backgrounds as a volume
+        self.bg_diff_volume[id]     = r['fixed_volume']   # corrected dataset
+        if id%50 == 0: print("slice {:d} done".format(id), flush=True)
+        sys.stdout.flush()
+        
+        #os.system("slice {:d} done".format(id))
+
+    def process_fulls_stack( self, verbose=False ):
+        self.circle_radii     = np.empty((self.z,) , dtype = np.int16 )
+        self.circle_max_radii = np.empty((self.z,) , dtype = np.int16 )
+        self.circle_centers   = np.empty((self.z,2), dtype = np.int32 )
+        self.pore_areas       = np.empty((self.z,) , dtype = np.float64 )
+
+        self.fixed_volume     = np.empty(shape=self.dataset.shape, dtype=np.uint8)
+        self.bg_diff_volume   = np.empty(shape=self.dataset.shape, dtype=np.uint8)
+
+        # benchmark a singe slice
+        self.select_slice(0)
+        time_start = time.time()
+        self.process_slice_cb( process_slice( 0, self.slice ) )
+        duration = time.time() - time_start
+
+        if verbose:
+            fig, ax = plt.subplots(1, 3, figsize=(18,6))
+
+            ax[0].imshow( self.slice.slice, cmap='gray' )
+            ax[0].set_title( "slice{: 5d} of{: 5d}".format(0, self.z) )
+            ax[0].set_xlabel("x-position in {}".format( self.unit ))
+            ax[0].set_ylabel("y-position in {}".format( self.unit ))
+
+            ax[1].imshow( self.bg_diff_volume[0], cmap='gray' )
+            ax[1].set_title( "background correction" )
+            ax[1].set_xlabel("x-position in {}".format( self.unit ))
+            ax[1].set_ylabel("y-position in {}".format( self.unit ))
+
+            ax[2].imshow( self.fixed_volume[0], cmap='gray' )
+            ax[2].set_title( "corrected slice" )
+            ax[2].set_xlabel("x-position in {}".format( self.unit ))
+            ax[2].set_ylabel("y-position in {}".format( self.unit ))
+
+            plt.show()
+
+        coreCount = multiprocessing.cpu_count()
+        processCount = (coreCount - 1) if coreCount > 1 else 1
+        print('Splitting slice processing in {:d} processes.'.format(processCount))
+        print('The processing of each slice may take around {:.1f} seconds'.format(duration))
+        print('The overall process may take {:.1f} minutes'.format(duration * self.z / processCount / 60))
+
+        pool = multiprocessing.Pool( processCount )
+        for i in range( 1, self.z ):
+            self.select_slice(i)
+            if processCount == 1:
+                self.process_slice_cb( process_slice( i, self.slice ) )
+            else:
+                pool.apply_async( process_slice, args=( i, self.slice ), callback=self.process_slice_cb)
+
+        pool.close() # close the process pool
+        pool.join()  # wait for all tasks to finish
+
+        self.circle_centers = np.swapaxes(self.circle_centers,0,1)
+        self.min_pore_pos   = np.argmin(self.pore_areas)
+
 
 class CTSlicePreprocessor:
     def __init__(self, id, slice, unit = 'px') -> None:
@@ -167,10 +238,10 @@ class CTSlicePreprocessor:
 
     # replace (black) pores with the median value of the slice to improve future processing
     def remove_pores(self, pore_mask = [], background = []):
-        if pore_mask == []: pore_mask = self.inner_pores
+        if len(pore_mask) == 0: pore_mask = self.inner_pores
         if self.center != (0,0):
             # use the median of the slice value to replace pores, if no other background is given
-            if background == []: background = np.median( self.slice )
+            if len(background) == 0: background = np.median( self.slice )
             self.removed_pores = (self.slice * np.logical_not( pore_mask ) + pore_mask * background)
 
             self.polar_image = self.circle_to_polar(self.removed_pores)
@@ -198,7 +269,7 @@ class CTSlicePreprocessor:
     # convert polar image back to a linear image
     def polar_to_circle(self, polar_image = []):
         if self.center != (0,0):
-            if polar_image == []: polar_image = self.polar_image # usually this image is used...
+            if len(polar_image) == 0: polar_image = self.polar_image # usually this image is used...
 
             unpolar = cv2.linearPolar(polar_image, (self.center[0], self.center[1]), self.min_length, cv2.WARP_INVERSE_MAP)
             return unpolar
@@ -207,10 +278,10 @@ class CTSlicePreprocessor:
 
 
     def get_mean_polar_brightness(self, polar_image = []):
-        is_main_polar = (polar_image != [])
+        is_main_polar = (len(polar_image) == 0)
         if is_main_polar: polar_image = self.polar_image # usually this image is used...
 
-        if polar_image != []:
+        if len(polar_image) > 0:
             mean_polar_brightness = (polar_image.sum(0)/len(polar_image)).astype(np.uint8)
 
             polar_background = np.empty(shape=polar_image.shape, dtype=int)
@@ -231,10 +302,10 @@ class CTSlicePreprocessor:
 
 
     def get_border_deviation(self, polar_image = [], show_graph = True):
-        is_main_polar = (polar_image != [])
+        is_main_polar = (len(polar_image) == 0)
         if is_main_polar: polar_image = self.polar_image # usually this image is used...
 
-        if polar_image != []:
+        if len(polar_image) > 0:
             border_position = []
             for i in range(len(polar_image)):
                 border_position.append(np.argmax(polar_image[i]))
@@ -264,9 +335,9 @@ class CTSlicePreprocessor:
             raise Exception( 'No polar image found. Check call variable polar_image or call self.circle_to_polar() first!' )
 
     def get_fit_function_start_values(self, mean_polar_brightness = []):
-        if mean_polar_brightness == []: mean_polar_brightness = self.mean_polar_brightness
+        if len(mean_polar_brightness) == 0: mean_polar_brightness = self.mean_polar_brightness
 
-        if mean_polar_brightness != []:
+        if len(mean_polar_brightness) > 0:
             p0 = (int(self.min_length/2),  int(self.min_length/3*2), np.min( mean_polar_brightness ), 1.5)
             return p0
         else:
@@ -284,11 +355,15 @@ class CTSlicePreprocessor:
         return polar_background_fit
 
     def get_polar_background(self, polar_image=[], verbose_level = 2):
-        if polar_image == []: polar_image = self.polar_image # usually this image is used...
+        is_main_polar = (len(polar_image) == 0)
+        if is_main_polar: polar_image = self.polar_image # usually this image is used...
 
-        if polar_image != []:
-            mean_values, polar_background = self.get_mean_polar_brightness(polar_image)
-            p0 = self.get_fit_function_start_values()
+        if len(polar_image) > 0:
+            if is_main_polar: 
+                mean_values, polar_background = self.get_mean_polar_brightness()
+            else:
+                mean_values, polar_background = self.get_mean_polar_brightness( polar_image )
+            p0 = self.get_fit_function_start_values( mean_values )
             fit_data, offset = fit_background_function( mean_values, p0, verbose_level = verbose_level )
             # process the background
             polar_background_fit = self.fit_to_polar( fit_data, polar_image )
@@ -298,15 +373,16 @@ class CTSlicePreprocessor:
             raise Exception( 'No polar image found. Check call variable polar_image or call self.circle_to_polar() first!' )
 
     def correct_circularity( self, border_position = [], border_deviation = [], show_result = False ):
-        if border_position == []:  border_position  = self.border_position
-        if border_deviation == []: border_deviation = self.border_deviation
+        if len(border_position)  == 0: border_position  = self.border_position
+        if len(border_deviation) == 0: border_deviation = self.border_deviation
 
         # ony metadata of self.polar_image is used
         goal_length = border_position[0]-border_deviation[0] # get a constant goal length
         circular_polar_image = []
+
         # resize each line, data is cropped to the goal length
         for i, line in enumerate(self.polar_image):
-            start_length = self.border_position[i]
+            start_length = border_position[i]
             circular_polar_image.append( cv2.resize( line[:start_length], (1, goal_length), interpolation = cv2.INTER_LINEAR ).flatten() )
 
         # extend the dataset to fit the original self.polar_image.shape
@@ -378,6 +454,30 @@ class CTSlicePreprocessor:
         self.fixed = fixed
         return fit_data, background_difference, background, fixed
 
+
+def process_slice( id, slice ):
+    #if id%50 == 0: print("slice {:d} start".format(id), flush=True)
+    #sys.stdout.flush()
+
+    slice.identify_main_circle(verbose=False)
+    slice.get_main_circle()
+    slice.identify_pores()
+
+    slice.remove_pores()
+
+    fit_data, bg_diff_volume, background, fixed_slice = slice.fix_background( iterations= 2, verbose_level = 0 )
+
+    #fixed_volume[i] = (CT.slice - CT.polar_to_circle( CT.fit_to_polar( fit_data, CT.polar_image ) )) * np.logical_not( CT.inner_pores )#CT.remove_pores( background = background_difference )
+
+    return {'id'            : id,
+            'min_length'    : slice.min_length, 
+            'radius'        : slice.radius,
+            'center'        : slice.center,
+            'pore_area'     : slice.pore_area_percent*100,
+            'bg_diff_volume': bg_diff_volume.astype(np.uint8),
+            'fixed_volume'  : fixed_slice.astype(np.uint8)
+            }
+
 def smooth_polar_image(polar_image, median_blur_kernel = 21):
     for i in range(len(polar_image)):
         polar_image[i] = cv2.medianBlur(polar_image[i].astype(np.uint8), median_blur_kernel).flatten()
@@ -385,4 +485,15 @@ def smooth_polar_image(polar_image, median_blur_kernel = 21):
     return polar_image
 
 if __name__ == "__main__":
-    print('nothing to see here. Use in Jupyter notebook.')
+    home_dir = os.path.dirname(os.path.realpath(__file__))
+    file_name = '84d tiff'
+    tiff_file = home_dir + os.sep + file_name + '.tif'
+    print('Loading "{}"'.format(tiff_file))
+    CT = CTPreprocessor(tiff_file)
+
+    CT.process_fulls_stack( verbose=False )
+    
+    tifffile.imwrite( home_dir + os.sep + file_name + '_fixed.tif', CT.fixed_volume )
+    tifffile.imwrite( home_dir + os.sep + file_name + '_bg.tif', CT.bg_diff_volume )
+
+    print('done...')
