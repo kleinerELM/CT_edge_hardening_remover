@@ -73,21 +73,41 @@ def fit_background_function( mean_values, p0 = (1000, 700, 100, 1.5), remove_y_o
     return fit_data, offset
 
 class CTPreprocessor:
-        
-    def __init__(self, filepath):
+
+    def __init__(self,
+                 filepath,                      # full path to dataset eg. 'C:\data\dataset.tif'
+                 pore_threshold = 70,           # value between 0 and 255 to differentiate pores from material
+                 circle_threshold = 20,         # value between 0 and 255 to differentiate the circle from the background
+                 gauss_kernel = 11,             # size of the Gauß kernel to soften the images used to apply thresholds
+                 unit = 'px',                   # unit has to be the same in all directions
+                 unit_factors = (1.0, 1.0, 1.0) # factor to convert px to chosen unit as float (w, h, z)
+                 ):
         if os.path.isfile(filepath):
+            self.unit             = unit
+            self.unit_factors     = unit_factors
+            self.pore_threshold   = pore_threshold
+            self.circle_threshold = circle_threshold
+            self.gauss_kernel     = gauss_kernel
+
             self.dataset = tifffile.imread(filepath)
             self.z, self.h, self.w = self.dataset.shape
-            print( "Dimensions: z = {:d}, h = {:d}, w = {:d} [px]".format(self.z, self.h, self.w) )
-            self.unit = 'px'
-
+            print( "Dimensions: w = {:d}, h = {:d}, z = {:d} [px]".format(self.w, self.h, self.z) )
+            if unit != 'px':
+                print( "            w = {:.1f}, h = {:.1f}, z = {:.1f} [{}]".format( self.w * unit_factors[0],
+                                                                                     self.h * unit_factors[1],
+                                                                                     self.z * unit_factors[2],
+                                                                                     unit ) )
         else:
             raise Exception( '{} does not exist!'.format(filepath) )
 
     def select_slice(self, id):
         self.slice_id   = id
-        self.slice      = CTSlicePreprocessor( id, self.dataset[ id ], self.unit )
-
+        self.slice      = CTSlicePreprocessor(  id,
+                                                self.dataset[ id ],
+                                                pore_threshold   = self.pore_threshold,
+                                                circle_threshold = self.circle_threshold,
+                                                gauss_kernel     = self.gauss_kernel,
+                                                unit             = self.unit )
         return self.slice.slice
 
     def show_example_slices(self):
@@ -113,14 +133,14 @@ class CTPreprocessor:
         self.circle_radii[id]       = r['radius']         # actual radius
         self.circle_centers[id]     = r['center']         # x and y position of the identified circle
         self.pore_areas[id]         = r['pore_area']      # porea area percentage
-        self.fixed_volume[id]       = r['bg_diff_volume'] # the processed backgrounds as a volume
-        self.bg_diff_volume[id]     = r['fixed_volume']   # corrected dataset
+        self.fixed_volume[id]       = r['fixed_volume'] # the processed backgrounds as a volume
+        self.bg_diff_volume[id]     = r['bg_diff_volume']   # corrected dataset
         if id%50 == 0: print("slice {:d} done".format(id), flush=True)
         sys.stdout.flush()
-        
+
         #os.system("slice {:d} done".format(id))
 
-    def process_fulls_stack( self, verbose=False ):
+    def process_full_stack( self, max_processes = 0, verbose=False ):
         self.circle_radii     = np.empty((self.z,) , dtype = np.int16 )
         self.circle_max_radii = np.empty((self.z,) , dtype = np.int16 )
         self.circle_centers   = np.empty((self.z,2), dtype = np.int32 )
@@ -157,6 +177,9 @@ class CTPreprocessor:
 
         coreCount = multiprocessing.cpu_count()
         processCount = (coreCount - 1) if coreCount > 1 else 1
+        if ( max_processes > 1 ) & ( processCount > max_processes ):
+            print('reduced process count from {:d} to {:d}'.format(processCount, max_processes))
+            processCount = max_processes
         print('Splitting slice processing in {:d} processes.'.format(processCount))
         print('The processing of each slice may take around {:.1f} seconds'.format(duration))
         print('The overall process may take {:.1f} minutes'.format(duration * self.z / processCount / 60))
@@ -177,19 +200,20 @@ class CTPreprocessor:
 
 
 class CTSlicePreprocessor:
-    def __init__(self, id, slice, unit = 'px') -> None:
+    center                = (0,0)
+    min_length            = 0
+    radius                = 0
+    blur                  = []
+    mean_polar_brightness = []
+
+    def __init__(self, id, slice, pore_threshold = 70, circle_threshold = 20, gauss_kernel = 11, unit = 'px') -> None:
         self.slice_id              = id
         self.slice                 = slice
-        self.center                = (0,0)
-        self.min_length            = 0
-        self.radius                = 0
-        self.blur                  = []
-        self.mean_polar_brightness = []
         self.h, self.w             = self.slice.shape # set some global constants
         self.unit                  = unit
-        self.gauss_kernel          = 11 # in px
-        self.circle_threshold      = 20 # brightness level
-        self.pore_threshold        = 70 # brightness level
+        self.gauss_kernel          = gauss_kernel # in px
+        self.circle_threshold      = circle_threshold # brightness level
+        self.pore_threshold        = pore_threshold # brightness level
 
     def identify_main_circle(self, verbose = True):
         if len(self.blur) == 0:
@@ -359,7 +383,7 @@ class CTSlicePreprocessor:
         if is_main_polar: polar_image = self.polar_image # usually this image is used...
 
         if len(polar_image) > 0:
-            if is_main_polar: 
+            if is_main_polar:
                 mean_values, polar_background = self.get_mean_polar_brightness()
             else:
                 mean_values, polar_background = self.get_mean_polar_brightness( polar_image )
@@ -470,7 +494,7 @@ def process_slice( id, slice ):
     #fixed_volume[i] = (CT.slice - CT.polar_to_circle( CT.fit_to_polar( fit_data, CT.polar_image ) )) * np.logical_not( CT.inner_pores )#CT.remove_pores( background = background_difference )
 
     return {'id'            : id,
-            'min_length'    : slice.min_length, 
+            'min_length'    : slice.min_length,
             'radius'        : slice.radius,
             'center'        : slice.center,
             'pore_area'     : slice.pore_area_percent*100,
@@ -485,15 +509,24 @@ def smooth_polar_image(polar_image, median_blur_kernel = 21):
     return polar_image
 
 if __name__ == "__main__":
+    import tkinter as tk
+    from tkinter import filedialog
+    #remove root windows
+    root = tk.Tk()
+    root.withdraw()
+
     home_dir = os.path.dirname(os.path.realpath(__file__))
-    file_name = '84d tiff'
-    tiff_file = home_dir + os.sep + file_name + '.tif'
+
+    tiff_file = filedialog.askopenfilename(initialdir = home_dir,title = "select 8-Bit 3D CT-Tiff stack",filetypes = (("Tif file","*.tif"),("Tiff file","*.tiff")))
+    save_dir  = os.path.dirname(tiff_file)
+    file_name = os.path.basename(tiff_file).split('.', 1)[0]
     print('Loading "{}"'.format(tiff_file))
+
     CT = CTPreprocessor(tiff_file)
 
-    CT.process_fulls_stack( verbose=False )
-    
-    tifffile.imwrite( home_dir + os.sep + file_name + '_fixed.tif', CT.fixed_volume )
-    tifffile.imwrite( home_dir + os.sep + file_name + '_bg.tif', CT.bg_diff_volume )
+    CT.process_full_stack( verbose=False )
+
+    tifffile.imwrite( save_dir + os.sep + file_name + '_fixed.tif', CT.fixed_volume )
+    tifffile.imwrite( save_dir + os.sep + file_name + '_bg.tif', CT.bg_diff_volume )
 
     print('done...')
