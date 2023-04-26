@@ -88,6 +88,11 @@ class CTPreprocessor:
             self.pore_threshold   = pore_threshold
             self.circle_threshold = circle_threshold
             self.gauss_kernel     = gauss_kernel
+            self.stack_statistics = {
+                'mean_radius' : 0.0,
+                'mean_center_point' : (0,0),
+                'mean_pore_area' : 0.0
+            }
 
             self.dataset = tifffile.imread(filepath)
             self.z, self.h, self.w = self.dataset.shape
@@ -107,7 +112,8 @@ class CTPreprocessor:
                                                 pore_threshold   = self.pore_threshold,
                                                 circle_threshold = self.circle_threshold,
                                                 gauss_kernel     = self.gauss_kernel,
-                                                unit             = self.unit )
+                                                unit             = self.unit,
+                                                stack_statistics = self.stack_statistics )
         return self.slice.slice
 
     def show_example_slices(self):
@@ -175,7 +181,7 @@ class CTPreprocessor:
 
             plt.show()
 
-        coreCount = multiprocessing.cpu_count()
+        coreCount = 1#multiprocessing.cpu_count()
         processCount = (coreCount - 1) if coreCount > 1 else 1
         if ( max_processes > 1 ) & ( processCount > max_processes ):
             print('reduced process count from {:d} to {:d}'.format(processCount, max_processes))
@@ -189,6 +195,9 @@ class CTPreprocessor:
             self.select_slice(i)
             if processCount == 1:
                 self.process_slice_cb( process_slice( i, self.slice ) )
+                self.stack_statistics['mean_radius']       = np.mean(self.circle_radii)
+                self.stack_statistics['mean_pore_area']    = np.mean(self.pore_areas)
+                #self.stack_statistics['mean_center_point'] = (0,0)
             else:
                 pool.apply_async( process_slice, args=( i, self.slice ), callback=self.process_slice_cb)
 
@@ -206,7 +215,7 @@ class CTSlicePreprocessor:
     blur                  = []
     mean_polar_brightness = []
 
-    def __init__(self, id, slice, pore_threshold = 70, circle_threshold = 20, gauss_kernel = 11, unit = 'px') -> None:
+    def __init__(self, id, slice, pore_threshold = 70, circle_threshold = 20, gauss_kernel = 11, unit = 'px', stack_statistics = {}) -> None:
         self.slice_id              = id
         self.slice                 = slice
         self.h, self.w             = self.slice.shape # set some global constants
@@ -214,6 +223,12 @@ class CTSlicePreprocessor:
         self.gauss_kernel          = gauss_kernel # in px
         self.circle_threshold      = circle_threshold # brightness level
         self.pore_threshold        = pore_threshold # brightness level
+
+        self.has_statistics        = 'mean_radius' in stack_statistics.keys()
+        self.has_statistics        = self.has_statistics & id > 3
+        self.mean_radius           = stack_statistics['mean_radius']       if 'mean_radius'       in stack_statistics.keys() else 0
+        self.mean_pore_area        = stack_statistics['mean_pore_area']    if 'mean_pore_area'    in stack_statistics.keys() else 0
+        self.mean_center_point     = stack_statistics['mean_center_point'] if 'mean_center_point' in stack_statistics.keys() else (0,0)
 
     def identify_main_circle(self, verbose = True):
         if len(self.blur) == 0:
@@ -313,12 +328,26 @@ class CTSlicePreprocessor:
             for i in range(len(polar_image)):
                 polar_background[i] = mean_polar_brightness
 
-            border_position = np.argmax(mean_polar_brightness)+2
+            self.radius = np.argmax(mean_polar_brightness)+2
+
+            if self.has_statistics:
+                if self.radius < 0.9*self.mean_radius | self.radius > 1.1*self.mean_radius:
+                    print('The calculated radius {:d} significantly differs from the last radii {:.1f}.'.format(self.radius, self.has_statistics))
+                    print('Replacing the value using the radius of the last slice.')
+                    self.radius = int(self.mean_radius)
+
+                    ax = plt.axes()
+                    ax.plot(range(len(polar_background)), polar_background, label='polar_background')
+                    ax.set_title('-')
+                    ax.set_ylabel('-')
+                    ax.set_xlim((0, len(self.polar_background)))
+                    ax.set_xlabel('-')
+                    ax.legend()
+                    plt.show()
 
             if is_main_polar:
                 self.mean_polar_brightness = mean_polar_brightness
                 self.polar_background      = polar_background
-                self.radius                = border_position
 
             return mean_polar_brightness, polar_background
         else:
