@@ -9,26 +9,75 @@ from scipy.ndimage import median_filter
 
 
 class _BackgroundFunction:
-    def __init__(self, function=lambda x, a, b: None, function_string="not defined"):
+    """base class for functional relationships describing the intensity distribution
+    in polar images
+    """
+
+    def __init__(
+        self, function=lambda x, a, b: None, function_string="not defined"
+    ) -> None:
         self.function = function
         self.params = np.ones(self.param_count - 1) * np.nan
         self.function_string = function_string
 
     @property
-    def param_count(self):
+    def param_count(self) -> int:
+        """Returns the number of parameters of the fitting funtion
+
+        Returns
+        -------
+        int
+            number of parameters of fitting function
+        """
         return self.function.__code__.co_argcount
 
     @property
-    def param_names(self):
+    def param_names(self) -> list[str]:
+        """Returns the names of the parameters of the fitting function
+
+        Returns
+        -------
+        list[str]
+            list of strings containing the parameter names of the fitting function
+        """
         return self.function.__code__.co_varnames[1:]
 
-    def fit(self, x, y, *args, **kwargs):
-        popt, pcov = scipy.optimize.curve_fit(self.function, x, y, *args, **kwargs)
+    def fit(self, x_data: np.ndarray, y_data: np.ndarray, *args, **kwargs):
+        """Fits the underlying function to the data provided by x and y.
+        args and kwargs are passed directly to scipy.optimize.curve_fit
+
+        Parameters
+        ----------
+        x_data : np.ndarray
+            x values used for curve fitting
+        y_data : np.ndarray
+            y values used for curve fitting
+
+        Returns
+        -------
+        self
+            returns its own instance
+        """
+        popt, _ = scipy.optimize.curve_fit(
+            self.function, x_data, y_data, *args, **kwargs
+        )
         self.params = np.array(popt)
         return self
 
-    def eval(self, x):
-        return self.function(x, *self.params)
+    def eval(self, x_eval: np.ndarray) -> np.ndarray:
+        """Evaluates the function with the fitted parameters at x_eval
+
+        Parameters
+        ----------
+        x_eval : np.ndarray
+            points to evaluate the function at
+
+        Returns
+        -------
+        np.ndarray
+            f(y) at x_eval
+        """
+        return self.function(x_eval, *self.params)
 
     # deletes all values after the maximum
     # def filter_values(self):
@@ -52,13 +101,18 @@ class _BackgroundFunction:
 
 
 class LinearBackgroundFunction(_BackgroundFunction):
+    """Background function with linear relationship b + a*x"""
+
     def __init__(self):
         function = lambda x, a, b: b + a * x
         function_string = "b + a*x"
         super().__init__(function=function, function_string=function_string)
 
 
+# TODO: combine linear and quadratic into polynomial class
 class QuadraticBackgroundFunction(_BackgroundFunction):
+    """Background function with quadratic relationship c + b*x + a*x**2"""
+
     def __init__(self):
         function = lambda x, a, b, c: c + b * x + a * x**2
         function_string = "c + b*x + a*x**2"
@@ -66,9 +120,29 @@ class QuadraticBackgroundFunction(_BackgroundFunction):
 
 
 class ExponentialBackgroundFunction(_BackgroundFunction):
+    """Background function with exponential relationship c + d ** (d ** ((x - x0) / b))"""
+
     def __init__(self):
         function = lambda x, x0, b, c, d: c + d ** (d ** ((x - x0) / b))
         function_string = "c + d ** (d ** ((x - x0) / b))"
+        super().__init__(function=function, function_string=function_string)
+
+
+class RootBackgroundFunction(_BackgroundFunction):
+    """Background function with root relationship b + (a * x**n)"""
+
+    def __init__(self):
+        function = lambda x, a, b, n: b + (a * x**n)
+        function_string = "b + (a * x**n)"
+        super().__init__(function=function, function_string=function_string)
+
+
+class SaturationBackgroundFunction(_BackgroundFunction):
+    """Background function with saturation relationship d - c * b ** (-a * x + d)"""
+
+    def __init__(self):
+        function = lambda x, a, b, c, d: d - c * b ** (-a * x + d)
+        function_string = "d - c * b ** (-a * x + d)"
         super().__init__(function=function, function_string=function_string)
 
 
