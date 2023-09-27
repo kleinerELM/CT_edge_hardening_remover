@@ -843,3 +843,242 @@ if __name__ == "__main__":
     tifffile.imwrite(save_dir + os.sep + file_name + "_bg.tif", CT.bg_diff_volume)
 
     print("done...")
+
+
+from pathlib import Path
+from scipy.interpolate import pchip_interpolate
+import warnings
+
+
+class CTSlice:
+    find_center_default = "contour"
+    filter_kernel_default = 5
+    mask_dtype = np.uint8
+
+    def __init__(
+        self, image: np.ndarray, x_crop=slice(None), y_crop=slice(None), image_path=None
+    ):
+        self.source = Path(image_path)
+        self.image = image[x_crop, y_crop]
+        assert len(self.shape) == 2, "Images has more than one channel!"
+        self.contour_threshold = (
+            self.dtype_max * 0.05
+        )  # threshold used to determine object contour, default 1/20 of max intensity
+        self.contour_mask = self.calc_contour_mask().contour_mask
+        self.pore_threshold = self.dtype_max * 0.2
+        self.pore_mask = self.calc_pore_mask().pore_mask
+        self.is_polar = False
+
+    @classmethod
+    def import_cv2(cls, image_path, *cv2_flags, x_crop=slice(None), y_crop=slice(None)):
+        image = cv2.imread(str(image_path), *cv2_flags)
+        return cls(image, x_crop=x_crop, y_crop=y_crop, image_path=image_path)
+
+    @property
+    def shape(self):
+        return self.image.shape
+
+    @property
+    def width(self):
+        return self.shape[0]
+
+    @property
+    def height(self):
+        return self.shape[1]
+
+    @property
+    def dtype(self):
+        return self.image.dtype
+
+    @property
+    def dtype_max(self):
+        return np.iinfo(self.dtype).max
+
+    @property
+    def dtype_min(self):
+        return np.iinfo(self.dtype).min
+
+    @property
+    def min(self):
+        return np.min(self.image)
+
+    @property
+    def max(self):
+        return np.max(self.image)
+
+    @property
+    def mean(self):
+        return np.mean(self.image)
+
+    @property
+    def median(self):
+        median = np.median(self.image)
+        # raise a warning if the median is 0 since it can lead to unwanted behaviour
+        # in later processing
+        if median == 0:
+            warnings.warn(
+                "Median is 0 which can lead to unexpected behaviour. Consider cropping the image prior to porcessing."
+            )
+        return np.median(self.image)
+
+    def calc_contour_mask(self):
+        """Detect object contour via simple thresholding. Threshold value can be adjusted via
+        self.contour_threshold. Default 1/20 of maximum possible intensity"""
+        self.contour_mask = scipy.ndimage.binary_fill_holes(
+            self.image > self.contour_threshold
+        ).astype(self.mask_dtype)
+        return self
+
+    def erode_contour_mask(self, *args, **kwargs):
+        self.contour_mask = scipy.ndimage.binary_erosion(
+            self.contour_mask, *args, **kwargs
+        ).astype(self.mask_dtype)
+        return self
+
+    def dilate_contour_mask(self, *args, **kwargs):
+        self.contour_mask = scipy.ndimage.binary_dilation(
+            self.contour_mask, *args, **kwargs
+        ).astype(self.mask_dtype)
+        return self
+
+    def calc_pore_mask(self, contour_mask=None):
+        if contour_mask is None:
+            contour_mask = self.contour_mask
+        self.pore_mask = np.logical_and(
+            contour_mask,
+            self.image < self.pore_threshold,
+        ).astype(self.mask_dtype)
+        return self
+
+    def hough_transform(self, blur=None):
+        if blur is None:
+            blur = self.filter_kernel_default
+        blur = cv2.medianBlur(
+            self.contour_mask,
+            ksize=blur,
+        )
+        c = cv2.HoughCircles(
+            blur,
+            method=cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=self.width,
+            param1=1,
+            param2=0.1,
+            minRadius=self.width // 3,
+            maxRadius=self.width // 2,
+        )
+        *center, radius = c[0][0]
+        return center, radius
+
+    def get_center(self, method=None):
+        if method is None:
+            method = self.find_center_default
+        if method == "contour":
+            return [np.average(ind) for ind in np.where(self.contour_mask)][::-1]
+        elif method == "hough":
+            return self.hough_transform()[0]
+        else:
+            raise NotImplementedError(f"Unknown method: '{method}'")
+
+    def center_slice(self, method=None):
+        if method is None:
+            method = self.find_center_default
+        cx_old, cy_old = self.width // 2, self.height // 2
+        cx_new, cy_new = self.get_center(method=method)
+        shift_x, shift_y = int(cx_new) - cx_old, int(cy_new) - cy_old
+        self.image = scipy.ndimage.shift(self.image, (shift_x, shift_y))
+        return self
+
+    def correct_circularity(self, *args, **kwargs):
+        if not self.is_polar:
+            self.transform()
+        contour = np.argmin(self.contour_mask, axis=1)
+        goal_length = np.median(contour)
+
+        def stretch_row(row, edge, goal, pad_to):
+            x_old = np.arange(edge)
+            x_new = np.linspace(0, edge, int(goal))
+            return np.pad(
+                pchip_interpolate(
+                    x_old[:],
+                    row[:edge],
+                    x_new,
+                ),
+                (0, int(pad_to - goal)),
+                mode="constant",
+                constant_values=(0, 0),
+            )
+
+        for i in range(self.height):
+            self.image[i, :] = stretch_row(
+                self.image[i, :], contour[i], goal_length, self.width
+            )
+        self.contour_mask = np.ones_like(self.image, dtype=self.mask_dtype)
+        self.contour_mask[:, int(goal_length) :] = 0
+        self.erode_contour_mask(*args, **kwargs).calc_pore_mask().dilate_contour_mask(
+            *args, **kwargs
+        )
+        return self
+
+    def transform(self, center: tuple = None, to: str = None):
+        """_summary_
+
+        Parameters
+        ----------
+        center : tuple, optional
+            _description_, by default None
+        to : str, optional
+            'polar' or 'linear' to specify transform, by default None
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        if center is None:
+            center = self.width / 2, self.height / 2
+
+        if (to != "linear") and (not self.is_polar):
+            self.image = cv2.linearPolar(
+                self.image, center, self.width // 2, cv2.WARP_FILL_OUTLIERS
+            )
+            self.contour_mask = cv2.linearPolar(
+                self.contour_mask, center, self.width // 2, cv2.WARP_FILL_OUTLIERS
+            )
+            self.pore_mask = cv2.linearPolar(
+                self.pore_mask, center, self.width // 2, cv2.WARP_FILL_OUTLIERS
+            )
+        elif (to != "polar") and self.is_polar:
+            self.image = cv2.linearPolar(
+                self.image,
+                center,
+                self.width // 2,
+                cv2.WARP_INVERSE_MAP + cv2.WARP_FILL_OUTLIERS,
+            )
+            self.contour_mask = cv2.linearPolar(
+                self.contour_mask,
+                center,
+                self.width // 2,
+                cv2.WARP_INVERSE_MAP + cv2.WARP_FILL_OUTLIERS,
+            )
+            self.pore_mask = cv2.linearPolar(
+                self.pore_mask,
+                center,
+                self.width // 2,
+                cv2.WARP_INVERSE_MAP + cv2.WARP_FILL_OUTLIERS,
+            )
+        else:
+            return self
+        self.is_polar = ~self.is_polar
+        return self
+
+    def __repr__(self) -> str:
+        return (
+            f"-- {self.__class__.__qualname__} --\n"
+            + f"   size            : {self.width} x {self.height} | {self.dtype}\n"
+            + f"   min intensity   : {self.min}\n"
+            + f"   max intensity   : {self.max}\n"
+            + f"   mean intensity  : {self.mean}\n"
+            + f"   median intensity: {self.median}\n"
+            + f"source: {self.source!s}"
+        )
