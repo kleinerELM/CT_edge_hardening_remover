@@ -847,6 +847,7 @@ if __name__ == "__main__":
 
 from pathlib import Path
 from scipy.interpolate import pchip_interpolate
+from scipy.optimize import curve_fit
 import warnings
 
 
@@ -859,7 +860,7 @@ class CTSlice:
         self, image: np.ndarray, x_crop=slice(None), y_crop=slice(None), image_path=None
     ):
         self.source = Path(image_path)
-        self.image = image[x_crop, y_crop]
+        self.image = image[y_crop, x_crop]
         assert len(self.shape) == 2, "Images has more than one channel!"
         self.contour_threshold = (
             self.dtype_max * 0.05
@@ -880,11 +881,11 @@ class CTSlice:
 
     @property
     def width(self):
-        return self.shape[0]
+        return self.shape[1]
 
     @property
     def height(self):
-        return self.shape[1]
+        return self.shape[0]
 
     @property
     def dtype(self):
@@ -974,26 +975,24 @@ class CTSlice:
         if method is None:
             method = self.find_center_default
         if method == "contour":
-            return [np.average(ind) for ind in np.where(self.contour_mask)][::-1]
+            return [np.average(ind) for ind in np.where(self.contour_mask)]
         elif method == "hough":
-            return self.hough_transform()[0]
+            return self.hough_transform()[0][::-1]
         else:
             raise NotImplementedError(f"Unknown method: '{method}'")
 
     def center_slice(self, method=None):
         if method is None:
             method = self.find_center_default
-        cx_old, cy_old = self.width // 2, self.height // 2
-        cx_new, cy_new = self.get_center(method=method)
-        shift_x, shift_y = int(cx_new) - cx_old, int(cy_new) - cy_old
+        cx_old, cy_old = self.get_center(method=method)
+        cx_new, cy_new = self.width / 2, self.height / 2
+        shift_x, shift_y = cx_new - cx_old, cy_new - cy_old
         self.image = scipy.ndimage.shift(self.image, (shift_x, shift_y))
         return self
 
-    def correct_circularity(self, *args, **kwargs):
+    def correct_circularity(self, contour, *args, **kwargs):
         if not self.is_polar:
             self.transform()
-        contour = np.argmin(self.contour_mask, axis=1)
-        goal_length = np.median(contour)
 
         def stretch_row(row, edge, goal, pad_to):
             x_old = np.arange(edge)
@@ -1009,10 +1008,13 @@ class CTSlice:
                 constant_values=(0, 0),
             )
 
+        goal_length = np.ceil(np.median(contour))
+
         for i in range(self.height):
             self.image[i, :] = stretch_row(
                 self.image[i, :], contour[i], goal_length, self.width
             )
+
         self.contour_mask = np.ones_like(self.image, dtype=self.mask_dtype)
         self.contour_mask[:, int(goal_length) :] = 0
         self.erode_contour_mask(*args, **kwargs).calc_pore_mask().dilate_contour_mask(
