@@ -64,6 +64,21 @@ class _BackgroundFunction:
         self.params = np.array(popt)
         return self
 
+    def eval_params(self, x_eval: np.ndarray, *params) -> np.ndarray:
+        """Evaluates the function with the provided parameters at x_eval
+
+        Parameters
+        ----------
+        x_eval : np.ndarray
+            points to evaluate the function at
+
+        Returns
+        -------
+        np.ndarray
+            f(y) at x_eval
+        """
+        return self.function(x_eval, *params)
+
     def eval(self, x_eval: np.ndarray) -> np.ndarray:
         """Evaluates the function with the fitted parameters at x_eval
 
