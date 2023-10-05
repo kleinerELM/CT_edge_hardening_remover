@@ -143,6 +143,17 @@ class ExponentialBackgroundFunction(_BackgroundFunction):
         super().__init__(function=function, function_string=function_string)
 
 
+class QuadraticExponentialBackgroundFunction(_BackgroundFunction):
+    """Background function with exponential relationship c + d ** (d ** ((x - x0) / b))"""
+
+    def __init__(self):
+        function = (
+            lambda x, x0, a, b, c, d, e: a + b * x + c * x**2 - d ** ((x - x0) / e)
+        )
+        function_string = "a + b*x + c*x**2 + d ** ((x - x0) / e))"
+        super().__init__(function=function, function_string=function_string)
+
+
 class RootBackgroundFunction(_BackgroundFunction):
     """Background function with root relationship b + (a * x**n)"""
 
@@ -969,8 +980,12 @@ class CTSlice:
     def hough_transform(self, blur=None):
         if blur is None:
             blur = self.filter_kernel_default
+        tmp_mask = self.contour_mask.copy()
+        # TODO needs to be removed
+        tmp_mask[:, 750:] = 0
         blur = cv2.medianBlur(
-            self.contour_mask,
+            # self.contour_mask,
+            tmp_mask,
             ksize=blur,
         )
         c = cv2.HoughCircles(
@@ -980,7 +995,7 @@ class CTSlice:
             minDist=self.width,
             param1=1,
             param2=0.1,
-            minRadius=self.width // 3,
+            minRadius=650,
             maxRadius=self.width // 2,
         )
         *center, radius = c[0][0]
@@ -996,16 +1011,28 @@ class CTSlice:
         else:
             raise NotImplementedError(f"Unknown method: '{method}'")
 
+    def shift_image(self, shift_x, shift_y):
+        self.image = scipy.ndimage.shift(self.image, (shift_x, shift_y))
+        return self
+
     def center_slice(self, method=None):
         if method is None:
             method = self.find_center_default
         cx_old, cy_old = self.get_center(method=method)
         cx_new, cy_new = self.width / 2, self.height / 2
         shift_x, shift_y = cx_new - cx_old, cy_new - cy_old
-        self.image = scipy.ndimage.shift(self.image, (shift_x, shift_y))
+        self.shift_image(shift_x=shift_x, shift_y=shift_y)
         return self
 
-    def correct_circularity(self, contour, *args, **kwargs):
+    def get_shift(self, method=None):
+        if method is None:
+            method = self.find_center_default
+        cx_old, cy_old = self.get_center(method=method)
+        cx_new, cy_new = self.width / 2, self.height / 2
+        shift_x, shift_y = cx_new - cx_old, cy_new - cy_old
+        return shift_x, shift_y
+
+    def correct_circularity(self, contour, *args, goal_length=None, **kwargs):
         if not self.is_polar:
             self.transform()
 
@@ -1023,7 +1050,8 @@ class CTSlice:
                 constant_values=(0, 0),
             )
 
-        goal_length = np.ceil(np.median(contour))
+        if goal_length is None:
+            goal_length = np.ceil(np.median(contour))
 
         for i in range(self.height):
             self.image[i, :] = stretch_row(
@@ -1052,6 +1080,7 @@ class CTSlice:
         _type_
             _description_
         """
+        assert to in [None, "polar", "linear"], "illegal <to> method"
         if center is None:
             center = self.width / 2, self.height / 2
 

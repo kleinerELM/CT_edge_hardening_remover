@@ -29,3 +29,5 @@ class SaturationBackgroundFunction(_BackgroundFunction):
             function_string=function_string
             )
 ```
+
+## Circularity Correction
