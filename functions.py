@@ -873,8 +873,43 @@ if __name__ == "__main__":
 
 from pathlib import Path
 from scipy.interpolate import pchip_interpolate
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, basinhopping, least_squares
 import warnings
+from skimage import draw
+
+
+def circular_mask(cx, cy, r, shape, dtype=np.bool_):
+    mask = np.zeros(shape, dtype=dtype)
+    rr, cc = draw.disk((cx, cy), r, shape=shape)
+    mask[rr, cc] = True
+    return mask
+
+
+def ring_mask(cx, cy, ri, ra, shape, dtype=np.bool_):
+    mask_inner = circular_mask(cx, cy, ri, shape, dtype)
+    mask_outer = circular_mask(cx, cy, ra, shape, dtype)
+    return np.logical_xor(mask_inner, mask_outer)
+
+
+def fit_circle(xs, ys):
+    xs, ys = np.array(xs), np.array(ys)
+
+    def circle(a, x, y):
+        # a[0] -> xm, a[1] -> ym, a[2] -> r
+        return (
+            2 * x * a[0]
+            + 2 * y * a[1]
+            + a[2] ** 2
+            - a[0] ** 2
+            - a[1] ** 2
+            - x**2
+            - y**2
+        )
+
+    res = least_squares(circle, [0, 0, 10], args=(xs, ys))
+    assert res.success, "Circle Fitting Failed!"
+    xm, ym, r = res.x[0], res.x[1], res.x[2]
+    return xm, ym, r
 
 
 class CTSlice:
@@ -889,10 +924,10 @@ class CTSlice:
         self.image = image[y_crop, x_crop]
         assert len(self.shape) == 2, "Images has more than one channel!"
         self.contour_threshold = (
-            self.dtype_max * 0.05
+            self.dtype_max * 0.355
         )  # threshold used to determine object contour, default 1/20 of max intensity
         self.contour_mask = self.calc_contour_mask().contour_mask
-        self.pore_threshold = self.dtype_max * 0.2
+        self.pore_threshold = self.dtype_max * 0.47
         self.pore_mask = self.calc_pore_mask().pore_mask
         self.is_polar = False
 
@@ -982,24 +1017,50 @@ class CTSlice:
             blur = self.filter_kernel_default
         tmp_mask = self.contour_mask.copy()
         # TODO needs to be removed
-        tmp_mask[:, 750:] = 0
+        tmp_mask[:750, :] = 0
         blur = cv2.medianBlur(
             # self.contour_mask,
             tmp_mask,
-            ksize=blur,
+            # ksize=blur,
+            ksize=101,
         )
         c = cv2.HoughCircles(
             blur,
             method=cv2.HOUGH_GRADIENT,
-            dp=1,
-            minDist=self.width,
+            dp=0.5,
+            minDist=50,
             param1=1,
             param2=0.1,
             minRadius=650,
             maxRadius=self.width // 2,
         )
-        *center, radius = c[0][0]
+        # check which circle is closest to image center
+        from matplotlib.patches import Circle
+
+        if len(c[0]) > 1:
+            c = sorted(
+                c[0],
+                key=lambda x: np.hypot(x[0] - self.width // 2, x[1] - self.height // 2),
+            )
+        else:
+            c = c[0]
+        *center, radius = c[0]
         return center, radius
+
+    def morphological_circle_contour(self):
+        blur = cv2.medianBlur(self.contour_mask, self.filter_kernel_default)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        opening = cv2.morphologyEx(blur, cv2.MORPH_OPEN, kernel, iterations=1)
+        cnts = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+        for c in cnts:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.04 * peri, True)
+            area = cv2.contourArea(c)
+            if len(approx) > 5 and area > 1000 and area < 5000000:
+                ((x, y), r) = cv2.minEnclosingCircle(c)
+
+        return (x, y), r
 
     def get_center(self, method=None):
         if method is None:
@@ -1008,6 +1069,26 @@ class CTSlice:
             return [np.average(ind) for ind in np.where(self.contour_mask)]
         elif method == "hough":
             return self.hough_transform()[0][::-1]
+        elif method == "morph":
+            return self.morphological_circle_contour()[0][::-1]
+        elif method == "basinhopping":
+            penalty_image = -((self.image > 37500) * 2 + 1)
+
+            def function(image, cx, cy, ri, ra):
+                mask = ring_mask(cx, cy, ri, ra, shape=self.shape)
+                return float(np.sum(image[mask]))
+
+            res = basinhopping(
+                lambda x, *args: function(-penalty_image / 1e6, x[0], x[1], 400, 600),
+                x0=[750, 750],
+            )
+            return res.x
+        elif method == "fit_circle":
+            circle_contour = cv2.Canny(self.contour_mask, 0, 1)
+            circle_contour[750:, :] = 0
+            contour_cords = np.where(circle_contour > 0)
+            cx, cy, r = fit_circle(*contour_cords)
+            return cx, cy
         else:
             raise NotImplementedError(f"Unknown method: '{method}'")
 
