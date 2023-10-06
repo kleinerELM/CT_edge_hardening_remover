@@ -8,6 +8,18 @@ The Jupyter notebook contains example code, which demonstrates the usage.
 
 The expected dataset is a 3-dimensional TIF-images (8bit).
 
+
+## Center detection
+An essential point for the whole processing is the determination of the center of the circular probe. As can be seen in the image below, an offset from the actual image center leads to a distortion in polar space.
+
+![](figures.readme/center_polar_transformation.png)
+
+## Circularity Correction
+
+![](./figures.readme/polar_shapes.png)
+- circle is line in polar space
+- map 
+
 ## Background Function Fit
 The radial intensity distribution can be approximated by fitting different kind of functions. Currently implemented are:
 - `LinearBackgroundFunction`: $b + a x$
@@ -29,5 +41,3 @@ class SaturationBackgroundFunction(_BackgroundFunction):
             function_string=function_string
             )
 ```
-
-## Circularity Correction
