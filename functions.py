@@ -22,7 +22,7 @@ class _BackgroundFunction:
 
     @property
     def param_count(self) -> int:
-        """Returns the number of parameters of the fitting funtion
+        """Returns the number of parameters of the fitting function
 
         Returns
         -------
@@ -115,27 +115,45 @@ class _BackgroundFunction:
         )
 
 
-class LinearBackgroundFunction(_BackgroundFunction):
-    """Background function with linear relationship b + a*x"""
+class PolynomialBackgroundFunction(_BackgroundFunction):
+    """Background function with polynomial relation ship of specified degree
+    sum_i a_i * x**(degree - i)
+    """
 
-    def __init__(self):
-        function = lambda x, a, b: b + a * x
-        function_string = "b + a*x"
+    def __init__(self, deg):
+        assert isinstance(deg, int), "degree must be an integer"
+        assert deg > 0, "degree can not be negative"
+        assert deg < 10, "degree to large, maximum degree 10"
+        self.deg = deg
+        function = np.poly1d
+        function_string = " + ".join(
+            [f"{a} * x**{self.deg - i}" for i, a in enumerate(self.param_names)]
+        )
         super().__init__(function=function, function_string=function_string)
 
+    @property
+    def param_count(self) -> int:
+        return self.deg + 1
 
-# TODO: combine linear and quadratic into polynomial class
-class QuadraticBackgroundFunction(_BackgroundFunction):
-    """Background function with quadratic relationship c + b*x + a*x**2"""
+    @property
+    def param_names(self) -> list[str]:
+        return list([f"a_{i}" for i in range(self.param_count)])
 
-    def __init__(self):
-        function = lambda x, a, b, c: c + b * x + a * x**2
-        function_string = "c + b*x + a*x**2"
-        super().__init__(function=function, function_string=function_string)
+    def fit(self, x_data: np.ndarray, y_data: np.ndarray, *args, **kwargs):
+        self.params = np.polyfit(x_data, y_data, self.deg, *args, **kwargs)
+        return self
+
+    def eval(self, x_eval: np.ndarray) -> np.ndarray:
+        return self.function(self.params)(x_eval)
+
+    def eval_params(self, x_eval: np.ndarray, *params) -> np.ndarray:
+        return self.function(*params)(x_eval)
 
 
 class ExponentialBackgroundFunction(_BackgroundFunction):
-    """Background function with exponential relationship c + d ** (d ** ((x - x0) / b))"""
+    """Background function with exponential relationship
+    c + d ** (d ** ((x - x0) / b))
+    """
 
     def __init__(self):
         function = lambda x, x0, b, c, d: c + d ** (d ** ((x - x0) / b))
@@ -144,7 +162,9 @@ class ExponentialBackgroundFunction(_BackgroundFunction):
 
 
 class QuadraticExponentialBackgroundFunction(_BackgroundFunction):
-    """Background function with exponential relationship c + d ** (d ** ((x - x0) / b))"""
+    """Background function mixing quadratic and exponential relationship
+    a + b*x + c*x**2 + d ** ((x - x0) / e))
+    """
 
     def __init__(self):
         function = (
@@ -155,7 +175,9 @@ class QuadraticExponentialBackgroundFunction(_BackgroundFunction):
 
 
 class RootBackgroundFunction(_BackgroundFunction):
-    """Background function with root relationship b + (a * x**n)"""
+    """Background function with root relationship
+    b + (a * x**n)
+    """
 
     def __init__(self):
         function = lambda x, a, b, n: b + (a * x**n)
@@ -164,7 +186,9 @@ class RootBackgroundFunction(_BackgroundFunction):
 
 
 class SaturationBackgroundFunction(_BackgroundFunction):
-    """Background function with saturation relationship d - c * b ** (-a * x + d)"""
+    """Background function with saturation relationship
+    d - c * b ** (-a * x + d)
+    """
 
     def __init__(self):
         function = lambda x, a, b, c, d: d - c * b ** (-a * x + d)
@@ -1017,34 +1041,45 @@ class CTSlice:
             blur = self.filter_kernel_default
         tmp_mask = self.contour_mask.copy()
         # TODO needs to be removed
-        tmp_mask[:750, :] = 0
+        tmp_mask[:1000, :] = 0
+        tmp_mask[:, 500:1000] = 0
         blur = cv2.medianBlur(
             # self.contour_mask,
             tmp_mask,
             # ksize=blur,
-            ksize=101,
+            ksize=11,
         )
         c = cv2.HoughCircles(
             blur,
             method=cv2.HOUGH_GRADIENT,
             dp=0.5,
-            minDist=50,
+            minDist=1000,
             param1=1,
             param2=0.1,
             minRadius=650,
-            maxRadius=self.width // 2,
+            maxRadius=750,
         )
         # check which circle is closest to image center
-        from matplotlib.patches import Circle
-
         if len(c[0]) > 1:
             c = sorted(
                 c[0],
-                key=lambda x: np.hypot(x[0] - self.width // 2, x[1] - self.height // 2),
+                # key=lambda x: np.hypot(x[0] - self.width // 2, x[1] - self.height // 2),
+                key=lambda x: np.sum(
+                    (
+                        self.contour_mask.astype(np.bool_)
+                        * circular_mask(
+                            x[0], x[1], x[2], shape=self.shape, dtype=np.bool_
+                        )
+                    ).astype(np.int8)
+                    * 4
+                    - 5
+                ),
             )
-        else:
+        elif len(c[0] == 1):
             c = c[0]
-        *center, radius = c[0]
+        else:
+            raise RuntimeError("No circle found")
+        *center, radius = c[-1]
         return center, radius
 
     def morphological_circle_contour(self):
@@ -1070,7 +1105,7 @@ class CTSlice:
         elif method == "hough":
             return self.hough_transform()[0][::-1]
         elif method == "morph":
-            return self.morphological_circle_contour()[0][::-1]
+            return self.morphological_circle_contour()[0]
         elif method == "basinhopping":
             penalty_image = -((self.image > 37500) * 2 + 1)
 
@@ -1101,8 +1136,8 @@ class CTSlice:
             method = self.find_center_default
         cx_old, cy_old = self.get_center(method=method)
         cx_new, cy_new = self.width / 2, self.height / 2
-        shift_x, shift_y = cx_new - cx_old, cy_new - cy_old
-        self.shift_image(shift_x=shift_x, shift_y=shift_y)
+        shift_x, shift_y = -cx_new + cx_old, -cy_new + cy_old
+        self.shift_image(shift_x=-shift_x, shift_y=-shift_y)
         return self
 
     def get_shift(self, method=None):

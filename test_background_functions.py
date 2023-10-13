@@ -1,7 +1,6 @@
 from functions import (
-    LinearBackgroundFunction,
+    PolynomialBackgroundFunction,
     ExponentialBackgroundFunction,
-    QuadraticBackgroundFunction,
     SaturationBackgroundFunction,
 )
 import numpy as np
@@ -21,7 +20,7 @@ ax.set_title("Linear")
 dummy_y = 50 + (0.1 * dummy_x)
 dummy_y += dummy_y * np.random.normal(0, 0.1, dummy_x.size)
 ax.plot(dummy_x, dummy_y)
-lin_bg = LinearBackgroundFunction()
+lin_bg = PolynomialBackgroundFunction(1)
 lin_bg.fit(dummy_x, dummy_y)
 print(lin_bg)
 ax.plot(dummy_x, lin_bg.eval(dummy_x))
@@ -35,7 +34,7 @@ ax.set_title("Quadratic")
 dummy_y = 50 - 0.03 * dummy_x + 0.0001 * dummy_x**2
 dummy_y += dummy_y * np.random.normal(0, 0.1, dummy_x.size)
 ax.plot(dummy_x, dummy_y)
-quad_bg = QuadraticBackgroundFunction()
+quad_bg = PolynomialBackgroundFunction(2)
 quad_bg.fit(dummy_x, dummy_y)
 print(quad_bg)
 ax.plot(dummy_x, quad_bg.eval(dummy_x))
